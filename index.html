@@ -2,8 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Онлайн Дурак (P2P)</title>
-    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <title>Онлайн Дурак (Сеть)</title>
     <style>
         body { font-family: Arial, sans-serif; background: #2e7d32; color: white; text-align: center; margin-top: 20px; }
         .hand { display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; min-height: 140px; }
@@ -15,37 +14,33 @@
         .card.disabled { opacity: 0.5; cursor: not-allowed; }
         #table { min-height: 150px; width: 320px; border: 2px dashed #81c784; margin: 20px auto; padding: 10px; display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; align-items: center;}
         button { background: #ffc107; color: black; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 5px; margin: 5px;}
-        input { padding: 10px; font-size: 16px; border-radius: 5px; border: none; }
+        input { padding: 10px; font-size: 16px; border-radius: 5px; border: none; width: 150px; }
         .hidden { display: none; }
         #roomStatus { font-size: 18px; margin-top: 20px; color: #ffeb3b; min-height: 30px; }
     </style>
 </head>
 <body>
 
-    <!-- МЕНЮ ОНЛАЙНА -->
+    <!-- МЕНЮ -->
     <div id="menu">
         <h1>Онлайн Дурак</h1>
-        <button onclick="hostGame()">Создать игру</button>
-        <p style="margin-top: 20px;">Или войти по коду:</p>
-        <input id="joinId" placeholder="Введите код игры">
-        <button onclick="joinGame()">Войти в игру</button>
+        <button onclick="createRoom()">Создать игру</button>
+        <p style="margin-top: 20px;">Друг дал вам код?</p>
+        <input id="joinCode" placeholder="Введите код">
+        <button onclick="joinRoom()">Войти в игру</button>
         <div id="roomStatus"></div>
     </div>
 
-    <!-- ИГРОВОЕ ПОЛЕ -->
+    <!-- ПОЛЕ -->
     <div id="game" class="hidden">
-        <div id="status">Ожидание хода...</div>
-        
+        <div id="status">Ожидание...</div>
         <h3>Противник (<span id="oppCount">0</span>)</h3>
         <div id="oppHand" class="hand"></div>
-
         <div id="table"></div>
-
         <h3>Вы (<span id="myCount">0</span>)</h3>
         <div id="myHand" class="hand"></div>
-        
-        <button onclick="takeCards()">Взять карты</button>
-        <button onclick="finishTurn()">Бито / Завершить ход</button>
+        <button onclick="doAction('take')">Взять карты</button>
+        <button onclick="doAction('finish')">Бито / Завершить ход</button>
     </div>
 
     <script>
@@ -53,7 +48,12 @@
         const RANKS = ['6', '7', '8', '9', '10', 'В', 'Д', 'К', 'Т'];
         const VAL = {'6':6, '7':7, '8':8, '9':9, '10':10, 'В':11, 'Д':12, 'К':13, 'Т':14};
 
-        let peer, conn, isHost = false;
+        let myId = Math.random().toString(36).substring(2);
+        let roomCode = null;
+        let ws = null;
+        let isHost = false;
+
+        // Состояние (полностью хранится у хоста)
         let state = {
             deck: [], trump: null,
             hostHand: [], clientHand: [],
@@ -64,78 +64,58 @@
             document.getElementById('roomStatus').innerText = msg;
         }
 
-        // --- СЕТЕВАЯ ЧАСТЬ ---
-        function hostGame() {
-            isHost = true;
-            setStatus("Подключение к сети... (может занять до 10 сек)");
+        // --- СЕТЬ (через облачный ретранслятор nfy.sh) ---
+        function connectNet() {
+            let url = "wss://ntfy.sh/" + roomCode + "/ws";
+            ws = new WebSocket(url);
             
-            // Прописываем сервера Google STUN для обхода NAT
-            peer = new Peer({
-                config: {
-                    'iceServers': [
-                        { 'urls': 'stun:stun.l.google.com:19302' },
-                        { 'urls': 'stun:stun1.l.google.com:19302' }
-                    ]
-                }
-            });
-
-            peer.on('open', (id) => {
-                setStatus("Ваш код игры: " + id + " (скиньте его другу)");
-            });
-
-            peer.on('error', (err) => {
-                console.error(err);
-                setStatus("Ошибка сети: " + err.type + ". Попробуйте перезагрузить страницу или отключить VPN.");
-            });
-
-            peer.on('connection', (c) => {
-                conn = c;
-                conn.on('open', () => {
-                    document.getElementById('menu').classList.add('hidden');
-                    document.getElementById('game').classList.remove('hidden');
-                    startGame();
-                });
-                conn.on('data', (data) => handleData(data));
-            });
-        }
-
-        function joinGame() {
-            isHost = false;
-            let id = document.getElementById('joinId').value.trim();
-            if (!id) { setStatus("Введите код!"); return; }
-            
-            setStatus("Поиск комнаты...");
-            
-            peer = new Peer({
-                config: {
-                    'iceServers': [
-                        { 'urls': 'stun:stun.l.google.com:19302' }
-                    ]
-                }
-            });
-
-            peer.on('open', () => {
-                setStatus("Подключение к противнику...");
-                conn = peer.connect(id);
+            ws.onopen = () => {
+                document.getElementById('menu').classList.add('hidden');
+                document.getElementById('game').classList.remove('hidden');
                 
-                conn.on('open', () => {
-                    document.getElementById('menu').classList.add('hidden');
-                    document.getElementById('game').classList.remove('hidden');
-                });
-                conn.on('data', (data) => handleData(data));
-            });
-
-            peer.on('error', (err) => {
-                console.error(err);
-                if (err.type === 'peer-unavailable') {
-                    setStatus("Комната не найдена. Проверьте код.");
+                if (isHost) {
+                    setStatus("Комната создана! Ожидание противника...");
                 } else {
-                    setStatus("Ошибка: " + err.type + ". Перезагрузите страницу.");
+                    setStatus("Подключение...");
+                    sendMsg({type: 'join'});
                 }
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    let data = JSON.parse(event.data);
+                    if (data.event !== 'message') return; // Игнорируем системные сообщения ntfy
+                    let msg = JSON.parse(data.message);
+                    if (msg.senderId === myId) return; // Игнорируем свои же сообщения
+                    
+                    handleMessage(msg);
+                } catch (e) {}
+            };
+
+            ws.onerror = () => setStatus("Ошибка соединения. Обновите страницу.");
+        }
+
+        function sendMsg(payload) {
+            payload.senderId = myId;
+            fetch("https://ntfy.sh/" + roomCode, {
+                method: "POST",
+                body: JSON.stringify(payload)
             });
         }
 
-        function send(msg) { if(conn) conn.send(msg); }
+        function handleMessage(msg) {
+            if (msg.type === 'join' && isHost) {
+                startGame(); // Запускаем игру, если гость зашел
+            } 
+            else if (msg.type === 'sync' && !isHost) {
+                state = msg.state; // Клиент получает состояние от хоста
+                render();
+            } 
+            else if (msg.type === 'action' && isHost) {
+                // Клиент отправил действие, хост обрабатывает
+                processAction(msg.action, msg.cardIdx, 'client');
+            }
+        }
 
         // --- ИГРОВАЯ ЛОГИКА ---
         function startGame() {
@@ -147,14 +127,8 @@
             state.hostHand = state.deck.splice(0, 6);
             state.clientHand = state.deck.splice(0, 6);
             state.table = [];
-            state.turn = 'attacker'; // Хост начинает первым
+            state.turn = 'attacker'; 
             updateAndSend();
-        }
-
-        function handleData(data) {
-            if (data.type === 'action') {
-                processAction(data.action, data.cardIdx, data.role);
-            }
         }
 
         function processAction(action, cardIdx, role) {
@@ -212,10 +186,32 @@
         }
 
         function updateAndSend() {
-            send({type: 'sync', state: state});
+            sendMsg({type: 'sync', state: state});
             render();
         }
 
+        function doAction(action) {
+            if (isHost) {
+                let myRole = 'host';
+                if ((action === 'take' && (myRole === state.defender && state.turn === 'defender')) ||
+                    (action === 'finish' && (myRole === state.attacker && state.turn === 'attacker'))) {
+                    processAction(action, null, myRole);
+                }
+            } else {
+                sendMsg({type: 'action', action: action, cardIdx: null});
+            }
+        }
+
+        function playCard(cardIdx) {
+            let myRole = isHost ? 'host' : 'client';
+            if (isHost) {
+                processAction('play', cardIdx, myRole);
+            } else {
+                sendMsg({type: 'action', action: 'play', cardIdx: cardIdx});
+            }
+        }
+
+        // --- ОТРИСОВКА ---
         function render() {
             let myRole = isHost ? 'host' : 'client';
             let myHand = myRole === 'host' ? state.hostHand : state.clientHand;
@@ -241,7 +237,7 @@
                 div.innerText = card.rank + card.suit;
                 
                 if (canPlay(myRole, card)) {
-                    div.onclick = () => processAction('play', i, myRole);
+                    div.onclick = () => playCard(i);
                 } else {
                     div.className += ' disabled';
                 }
@@ -269,17 +265,21 @@
             document.getElementById('status').innerHTML = status;
         }
 
-        function takeCards() {
-            let myRole = isHost ? 'host' : 'client';
-            if (myRole === state.defender && state.turn === 'defender') {
-                processAction('take', null, myRole);
-            }
+        // --- МЕНЮ ДЕЙСТВИЯ ---
+        function createRoom() {
+            isHost = true;
+            roomCode = 'durak' + Math.floor(Math.random() * 90000) + 10000;
+            setStatus("Создание комнаты...");
+            connectNet();
         }
-        function finishTurn() {
-            let myRole = isHost ? 'host' : 'client';
-            if (myRole === state.attacker && state.turn === 'attacker') {
-                processAction('finish', null, myRole);
-            }
+
+        function joinRoom() {
+            isHost = false;
+            let code = document.getElementById('joinCode').value.trim();
+            if (!code) { setStatus("Введите код!"); return; }
+            roomCode = 'durak' + code; // Добавляем префикс, чтобы не пересечься с другими на сервере
+            setStatus("Подключение к комнате...");
+            connectNet();
         }
     </script>
 </body>
