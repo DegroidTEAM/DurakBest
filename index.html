@@ -1,1 +1,248 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Онлайн Дурак (P2P)</title>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background: #2e7d32; color: white; text-align: center; margin-top: 20px; }
+        .hand { display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; min-height: 140px; }
+        .card { background: white; color: black; border-radius: 8px; width: 80px; height: 120px; 
+                display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: bold;
+                cursor: pointer; box-shadow: 2px 2px 5px rgba(0,0,0,0.5); border: 2px solid #ccc; user-select: none;}
+        .card.red { color: red; }
+        .card.back { background: #1565c0; color: #1565c0; cursor: default; }
+        .card.disabled { opacity: 0.5; cursor: not-allowed; }
+        #table { min-height: 150px; width: 320px; border: 2px dashed #81c784; margin: 20px auto; padding: 10px; display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; align-items: center;}
+        button { background: #ffc107; color: black; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 5px; margin: 5px;}
+        input { padding: 10px; font-size: 16px; border-radius: 5px; border: none; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
 
+    <!-- МЕНЮ ОНЛАЙНА -->
+    <div id="menu">
+        <h1>Онлайн Дурак</h1>
+        <button onclick="hostGame()">Создать игру</button>
+        <p style="margin-top: 20px;">Или войти по коду:</p>
+        <input id="joinId" placeholder="Введите код игры">
+        <button onclick="joinGame()">Войти в игру</button>
+        <p id="roomStatus" style="color: #ffeb3b;"></p>
+    </div>
+
+    <!-- ИГРОВОЕ ПОЛЕ -->
+    <div id="game" class="hidden">
+        <div id="status">Ожидание хода...</div>
+        
+        <h3>Противник (<span id="oppCount">0</span>)</h3>
+        <div id="oppHand" class="hand"></div>
+
+        <div id="table"></div>
+
+        <h3>Вы (<span id="myCount">0</span>)</h3>
+        <div id="myHand" class="hand"></div>
+        
+        <button onclick="takeCards()">Взять карты</button>
+        <button onclick="finishTurn()">Бито / Завершить ход</button>
+    </div>
+
+    <script>
+        // Логика карт
+        const SUITS = ['♠', '♥', '♦', '♣'];
+        const RANKS = ['6', '7', '8', '9', '10', 'В', 'Д', 'К', 'Т'];
+        const VAL = {'6':6, '7':7, '8':8, '9':9, '10':10, 'В':11, 'Д':12, 'К':13, 'Т':14};
+
+        let peer, conn, isHost = false;
+        let state = {
+            deck: [], trump: null,
+            hostHand: [], clientHand: [],
+            table: [], turn: 'attacker', attacker: 'host', defender: 'client'
+        };
+
+        // --- СЕТЕВАЯ ЧАСТЬ ---
+        function hostGame() {
+            isHost = true;
+            peer = new Peer();
+            document.getElementById('roomStatus').innerText = "Создание комнаты...";
+            peer.on('open', (id) => {
+                document.getElementById('roomStatus').innerText = "Ваш код игры: " + id + " (скиньте его другу)";
+            });
+            peer.on('connection', (c) => {
+                conn = c;
+                conn.on('open', () => {
+                    document.getElementById('menu').classList.add('hidden');
+                    document.getElementById('game').classList.remove('hidden');
+                    startGame();
+                });
+                conn.on('data', (data) => handleData(data));
+            });
+        }
+
+        function joinGame() {
+            isHost = false;
+            let id = document.getElementById('joinId').value;
+            peer = new Peer();
+            peer.on('open', () => {
+                conn = peer.connect(id);
+                conn.on('open', () => {
+                    document.getElementById('menu').classList.add('hidden');
+                    document.getElementById('game').classList.remove('hidden');
+                });
+                conn.on('data', (data) => handleData(data));
+            });
+        }
+
+        function send(msg) { if(conn) conn.send(msg); }
+
+        // --- ИГРОВАЯ ЛОГИКА ---
+        function startGame() {
+            state.deck = [];
+            for (let s of SUITS) for (let r of RANKS) state.deck.push({suit: s, rank: r, value: VAL[r]});
+            state.deck.sort(() => Math.random() - 0.5);
+            state.trump = state.deck.pop();
+            state.deck.push(state.trump);
+            state.hostHand = state.deck.splice(0, 6);
+            state.clientHand = state.deck.splice(0, 6);
+            state.table = [];
+            state.turn = 'attacker'; // Хост начинает первым
+            updateAndSend();
+        }
+
+        function handleData(data) {
+            if (data.type === 'action') {
+                processAction(data.action, data.cardIdx, data.role);
+            }
+        }
+
+        function processAction(action, cardIdx, role) {
+            if (role !== state.attacker && role !== state.defender) return;
+            let hand = role === 'host' ? state.hostHand : state.clientHand;
+
+            if (action === 'play') {
+                if (canPlay(role, hand[cardIdx])) {
+                    let card = hand.splice(cardIdx, 1)[0];
+                    state.table.push({card, role});
+                    state.turn = state.turn === 'attacker' ? 'defender' : 'attacker';
+                    updateAndSend();
+                }
+            } else if (action === 'take') {
+                if (role === state.defender) {
+                    hand.push(...state.table.map(t => t.card));
+                    state.table = [];
+                    state.turn = 'attacker'; // Атакующий продолжает или бьет
+                    updateAndSend();
+                }
+            } else if (action === 'finish') {
+                if (role === state.attacker) {
+                    state.table = [];
+                    drawCards();
+                    // меняем роли
+                    let temp = state.attacker;
+                    state.attacker = state.defender;
+                    state.defender = temp;
+                    state.turn = 'attacker';
+                    updateAndSend();
+                }
+            }
+        }
+
+        function canPlay(role, card) {
+            if (!card) return false;
+            if (role === state.attacker && state.turn === 'attacker') {
+                if (state.table.length === 0) return true; // первый ход
+                // подкидываем карту такого же номинала
+                return state.table.some(t => t.card.rank === card.rank);
+            }
+            if (role === state.defender && state.turn === 'defender') {
+                let lastAttack = state.table.filter(t => t.role === state.attacker).pop();
+                if (!lastAttack) return false;
+                let att = lastAttack.card;
+                if (card.suit === att.suit && card.value > att.value) return true;
+                if (card.suit === state.trump.suit && att.suit !== state.trump.suit) return true;
+            }
+            return false;
+        }
+
+        function drawCards() {
+            let attHand = state.attacker === 'host' ? state.hostHand : state.clientHand;
+            let defHand = state.defender === 'host' ? state.hostHand : state.clientHand;
+            while(attHand.length < 6 && state.deck.length > 0) attHand.push(state.deck.pop());
+            while(defHand.length < 6 && state.deck.length > 0) defHand.push(state.deck.pop());
+        }
+
+        function updateAndSend() {
+            send({type: 'sync', state: state});
+            render();
+        }
+
+        // --- ОТРИСОВКА ЭКРАНА ---
+        function render() {
+            let myRole = isHost ? 'host' : 'client';
+            let myHand = myRole === 'host' ? state.hostHand : state.clientHand;
+            let oppHand = myRole === 'host' ? state.clientHand : state.hostHand;
+
+            document.getElementById('myCount').innerText = myHand.length;
+            document.getElementById('oppCount').innerText = oppHand.length;
+
+            let myHandDiv = document.getElementById('myHand');
+            let oppHandDiv = document.getElementById('oppHand');
+            let tableDiv = document.getElementById('table');
+
+            myHandDiv.innerHTML = '';
+            oppHandDiv.innerHTML = '';
+            tableDiv.innerHTML = '';
+
+            let isMyTurn = (state.turn === 'attacker' && myRole === state.attacker) || 
+                           (state.turn === 'defender' && myRole === state.defender);
+
+            myHand.forEach((card, i) => {
+                let div = document.createElement('div');
+                div.className = 'card' + (card.suit === '♥' || card.suit === '♦' ? ' red' : '');
+                div.innerText = card.rank + card.suit;
+                
+                if (canPlay(myRole, card)) {
+                    div.onclick = () => processAction('play', i, myRole);
+                } else {
+                    div.className += ' disabled';
+                }
+                myHandDiv.appendChild(div);
+            });
+
+            oppHand.forEach(() => {
+                let div = document.createElement('div');
+                div.className = 'card back';
+                div.innerText = '?';
+                oppHandDiv.appendChild(div);
+            });
+
+            state.table.forEach(t => {
+                let div = document.createElement('div');
+                div.className = 'card' + (t.card.suit === '♥' || t.card.suit === '♦' ? ' red' : '');
+                div.innerText = t.card.rank + t.card.suit;
+                if (t.role === state.defender) div.style.transform = 'rotate(90deg)';
+                tableDiv.appendChild(div);
+            });
+
+            let status = isMyTurn ? "Ваш ход!" : "Ждем хода противника...";
+            if (state.turn === 'attacker') status += " (Атака)"; else status += " (Защита)";
+            if(state.trump) status += ` | Козырь: ${state.trump.rank}${state.trump.suit}`;
+            document.getElementById('status').innerHTML = status;
+        }
+
+        // Кнопки
+        function takeCards() {
+            let myRole = isHost ? 'host' : 'client';
+            if (myRole === state.defender && state.turn === 'defender') {
+                processAction('take', null, myRole);
+            }
+        }
+        function finishTurn() {
+            let myRole = isHost ? 'host' : 'client';
+            if (myRole === state.attacker && state.turn === 'attacker') {
+                processAction('finish', null, myRole);
+            }
+        }
+    </script>
+</body>
+</html>
