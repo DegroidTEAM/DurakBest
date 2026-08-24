@@ -17,6 +17,7 @@
         button { background: #ffc107; color: black; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 5px; margin: 5px;}
         input { padding: 10px; font-size: 16px; border-radius: 5px; border: none; }
         .hidden { display: none; }
+        #roomStatus { font-size: 18px; margin-top: 20px; color: #ffeb3b; min-height: 30px; }
     </style>
 </head>
 <body>
@@ -28,7 +29,7 @@
         <p style="margin-top: 20px;">Или войти по коду:</p>
         <input id="joinId" placeholder="Введите код игры">
         <button onclick="joinGame()">Войти в игру</button>
-        <p id="roomStatus" style="color: #ffeb3b;"></p>
+        <div id="roomStatus"></div>
     </div>
 
     <!-- ИГРОВОЕ ПОЛЕ -->
@@ -48,7 +49,6 @@
     </div>
 
     <script>
-        // Логика карт
         const SUITS = ['♠', '♥', '♦', '♣'];
         const RANKS = ['6', '7', '8', '9', '10', 'В', 'Д', 'К', 'Т'];
         const VAL = {'6':6, '7':7, '8':8, '9':9, '10':10, 'В':11, 'Д':12, 'К':13, 'Т':14};
@@ -60,14 +60,34 @@
             table: [], turn: 'attacker', attacker: 'host', defender: 'client'
         };
 
+        function setStatus(msg) {
+            document.getElementById('roomStatus').innerText = msg;
+        }
+
         // --- СЕТЕВАЯ ЧАСТЬ ---
         function hostGame() {
             isHost = true;
-            peer = new Peer();
-            document.getElementById('roomStatus').innerText = "Создание комнаты...";
-            peer.on('open', (id) => {
-                document.getElementById('roomStatus').innerText = "Ваш код игры: " + id + " (скиньте его другу)";
+            setStatus("Подключение к сети... (может занять до 10 сек)");
+            
+            // Прописываем сервера Google STUN для обхода NAT
+            peer = new Peer({
+                config: {
+                    'iceServers': [
+                        { 'urls': 'stun:stun.l.google.com:19302' },
+                        { 'urls': 'stun:stun1.l.google.com:19302' }
+                    ]
+                }
             });
+
+            peer.on('open', (id) => {
+                setStatus("Ваш код игры: " + id + " (скиньте его другу)");
+            });
+
+            peer.on('error', (err) => {
+                console.error(err);
+                setStatus("Ошибка сети: " + err.type + ". Попробуйте перезагрузить страницу или отключить VPN.");
+            });
+
             peer.on('connection', (c) => {
                 conn = c;
                 conn.on('open', () => {
@@ -81,15 +101,37 @@
 
         function joinGame() {
             isHost = false;
-            let id = document.getElementById('joinId').value;
-            peer = new Peer();
+            let id = document.getElementById('joinId').value.trim();
+            if (!id) { setStatus("Введите код!"); return; }
+            
+            setStatus("Поиск комнаты...");
+            
+            peer = new Peer({
+                config: {
+                    'iceServers': [
+                        { 'urls': 'stun:stun.l.google.com:19302' }
+                    ]
+                }
+            });
+
             peer.on('open', () => {
+                setStatus("Подключение к противнику...");
                 conn = peer.connect(id);
+                
                 conn.on('open', () => {
                     document.getElementById('menu').classList.add('hidden');
                     document.getElementById('game').classList.remove('hidden');
                 });
                 conn.on('data', (data) => handleData(data));
+            });
+
+            peer.on('error', (err) => {
+                console.error(err);
+                if (err.type === 'peer-unavailable') {
+                    setStatus("Комната не найдена. Проверьте код.");
+                } else {
+                    setStatus("Ошибка: " + err.type + ". Перезагрузите страницу.");
+                }
             });
         }
 
@@ -130,14 +172,13 @@
                 if (role === state.defender) {
                     hand.push(...state.table.map(t => t.card));
                     state.table = [];
-                    state.turn = 'attacker'; // Атакующий продолжает или бьет
+                    state.turn = 'attacker'; 
                     updateAndSend();
                 }
             } else if (action === 'finish') {
                 if (role === state.attacker) {
                     state.table = [];
                     drawCards();
-                    // меняем роли
                     let temp = state.attacker;
                     state.attacker = state.defender;
                     state.defender = temp;
@@ -150,8 +191,7 @@
         function canPlay(role, card) {
             if (!card) return false;
             if (role === state.attacker && state.turn === 'attacker') {
-                if (state.table.length === 0) return true; // первый ход
-                // подкидываем карту такого же номинала
+                if (state.table.length === 0) return true; 
                 return state.table.some(t => t.card.rank === card.rank);
             }
             if (role === state.defender && state.turn === 'defender') {
@@ -176,7 +216,6 @@
             render();
         }
 
-        // --- ОТРИСОВКА ЭКРАНА ---
         function render() {
             let myRole = isHost ? 'host' : 'client';
             let myHand = myRole === 'host' ? state.hostHand : state.clientHand;
@@ -230,7 +269,6 @@
             document.getElementById('status').innerHTML = status;
         }
 
-        // Кнопки
         function takeCards() {
             let myRole = isHost ? 'host' : 'client';
             if (myRole === state.defender && state.turn === 'defender') {
